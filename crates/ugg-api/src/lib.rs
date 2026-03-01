@@ -9,7 +9,8 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use ugg_types::mappings::{self, Rank};
+use ugg_types::mappings::{Role, Region, Mode, Build, Rank};
+use ugg_types::meta_summary::MetaSummary; // adjust module path to wherever you put it
 use ugg_types::matchups::{MatchupData, Matchups};
 use ugg_types::overview::{ChampOverview, Overview};
 use ugg_types::rune::RuneExtended;
@@ -304,12 +305,12 @@ impl DataApi {
         &self,
         patch: &str,
         champ: &ChampionShort,
-        role: mappings::Role,
-        region: mappings::Region,
-        mode: mappings::Mode,
-        build: mappings::Build,
+        role: Role,
+        region: Region,
+        mode: Mode,
+        build: Build,
         api_versions: &HashMap<String, HashMap<String, String>>,
-    ) -> Result<(Overview, mappings::Role), UggError> {
+    ) -> Result<(Overview, Role), UggError> {
         let api_version =
             if api_versions.contains_key(patch) && api_versions[patch].contains_key("overview") {
                 api_versions[patch]["overview"].as_str()
@@ -357,11 +358,11 @@ impl DataApi {
         &self,
         patch: &str,
         champ: &ChampionShort,
-        role: mappings::Role,
-        region: mappings::Region,
-        mode: mappings::Mode,
+        role: Role,
+        region: Region,
+        mode: Mode,
         api_versions: &HashMap<String, HashMap<String, String>>,
-    ) -> Result<(MatchupData, mappings::Role), UggError> {
+    ) -> Result<(MatchupData, Role), UggError> {
         let api_version =
             if api_versions.contains_key(patch) && api_versions[patch].contains_key("matchups") {
                 api_versions[patch]["matchups"].as_str()
@@ -403,6 +404,45 @@ impl DataApi {
             .map(|(role, data)| (data.data.clone(), *role))
             .ok_or(UggError::MissingRole)
     }
+
+    pub fn get_meta_summary(
+        &self,
+        patch: &str,                 // e.g. "16_4"
+        region: Region,    // e.g. World
+        mode: Mode,        // e.g. RankedSolo5x5
+        rank: Rank,                  // e.g. EmeraldPlus / Diamond2Plus
+        api_versions: &HashMap<String, HashMap<String, String>>,
+    ) -> Result<MetaSummary, UggError> {
+        // Endpoint version: stored under something like "champion_ranking" most likely.
+        // Fallback to 1.5.0 like your other endpoints.
+        let api_version = if api_versions.contains_key(patch)
+            && api_versions[patch].contains_key("champion_ranking")
+        {
+            api_versions[patch]["champion_ranking"].as_str()
+        } else {
+            "1.5.0"
+        };
+
+        let region_str = region.to_api_string(); // "world"
+        let patch_str = patch;                   // "16_4"
+        let mode_str = mode.to_api_string();     // "ranked_solo_5x5"
+        let rank_str = rank.to_api_string();     // "emerald_plus" / "diamond_2_plus"
+
+        // Build the URL exactly like your examples
+        let url = format!(
+            "https://stats2.u.gg/lol/1.5/champion_ranking/{}/{}/{}/{}/{}.json",
+            region_str, patch_str, mode_str, rank_str, api_version
+        );
+
+        // Cache key should uniquely identify data slice
+        let cache_path = format!(
+            "champion_ranking/{}/{}/{}/{}/{}",
+            region_str, patch_str, mode_str, rank_str, api_version
+        );
+
+        self.get_data_cached_json(&url, "champion_ranking", &cache_path)
+    }
+
 }
 
 impl UggApi {
@@ -502,11 +542,11 @@ impl UggApi {
     pub fn get_stats(
         &self,
         champ: &ChampionShort,
-        role: mappings::Role,
-        region: mappings::Region,
-        mode: mappings::Mode,
-        build: mappings::Build,
-    ) -> Result<(Overview, mappings::Role), UggError> {
+        role: Role,
+        region: Region,
+        mode: Mode,
+        build: Build,
+    ) -> Result<(Overview, Role), UggError> {
         self.api.get_stats(
             &self.patch_version,
             champ,
@@ -521,10 +561,10 @@ impl UggApi {
     pub fn get_matchups(
         &self,
         champ: &ChampionShort,
-        role: mappings::Role,
-        region: mappings::Region,
-        mode: mappings::Mode,
-    ) -> Result<(MatchupData, mappings::Role), UggError> {
+        role: Role,
+        region: Region,
+        mode: Mode,
+    ) -> Result<(MatchupData, Role), UggError> {
         self.api.get_matchups(
             &self.patch_version,
             champ,

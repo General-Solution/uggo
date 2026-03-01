@@ -101,6 +101,30 @@ impl Rank {
             Rank::Challenger,
         ]
     }
+
+    #[must_use]
+    pub const fn to_api_string(&self) -> &'static str {
+        match self {
+            Rank::Overall => "overall",
+
+            Rank::Iron => "iron",
+            Rank::Bronze => "bronze",
+            Rank::Silver => "silver",
+            Rank::Gold => "gold",
+            Rank::Platinum => "platinum",
+            Rank::Emerald => "emerald",
+            Rank::Diamond => "diamond",
+            Rank::Master => "master",
+            Rank::Grandmaster => "grandmaster",
+            Rank::Challenger => "challenger",
+
+            Rank::PlatinumPlus => "platinum_plus",
+            Rank::EmeraldPlus => "emerald_plus",
+            Rank::DiamondPlus => "diamond_plus",
+            Rank::Diamond2Plus => "diamond_2_plus",
+            Rank::MasterPlus => "master_plus",
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
