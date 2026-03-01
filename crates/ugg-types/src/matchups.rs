@@ -1,6 +1,3 @@
-// Credit to https://github.com/pradishb/ugg-parser for figuring out the
-// structure of the champ overview stats data.
-
 use crate::mappings;
 use serde::Serialize;
 use serde::de::{Deserialize, Deserializer, IgnoredAny, SeqAccess, Visitor};
@@ -26,7 +23,7 @@ impl<'de> Deserialize<'de> for WrappedMatchupData {
             type Value = WrappedMatchupData;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("waa")
+                formatter.write_str("a sequence whose first element is MatchupData")
             }
 
             fn visit_seq<V>(self, mut visitor: V) -> Result<WrappedMatchupData, V::Error>
@@ -49,8 +46,8 @@ impl<'de> Deserialize<'de> for WrappedMatchupData {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MatchupData {
-    pub best_matchups: Vec<Matchup>,
-    pub worst_matchups: Vec<Matchup>,
+    /// All matchups (no filtering, not truncated).
+    pub matchups: Vec<Matchup>,
     pub total_matches: i32,
 }
 
@@ -73,61 +70,52 @@ impl<'de> Deserialize<'de> for MatchupData {
             type Value = MatchupData;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("overview data")
+                formatter.write_str("matchup data as a sequence of inner matchup rows")
             }
 
             fn visit_seq<V>(self, mut visitor: V) -> Result<MatchupData, V::Error>
             where
                 V: SeqAccess<'de>,
             {
-                let mut all_matchups: Vec<Matchup> = vec![];
+                let mut all_matchups: Vec<Matchup> = Vec::new();
                 let mut total_matches: i32 = 0;
 
-                while let Ok(data_opt) = visitor.next_element::<InnerData>() {
-                    match data_opt {
-                        Some(data) => {
-                            let wins = data.2 - data.1;
-                            let winrate = f64::from(wins) / f64::from(data.2);
+                while let Ok(row_opt) = visitor.next_element::<InnerData>() {
+                    match row_opt {
+                        Some(row) => {
+                            let wins = row.2 - row.1;
+                            let winrate = if row.2 > 0 {
+                                f64::from(wins) / f64::from(row.2)
+                            } else {
+                                0.0
+                            };
+
                             all_matchups.push(Matchup {
-                                champion_id: data.0,
+                                champion_id: row.0,
                                 wins,
-                                matches: data.2,
+                                matches: row.2,
                                 winrate,
                             });
-                            total_matches += data.2;
+
+                            total_matches += row.2;
                         }
-                        None => {
-                            break;
-                        }
+                        None => break,
                     }
                 }
 
-                // Only consider matchups that represent at least a 0.5% possibility of showing up
-                all_matchups = all_matchups
-                    .into_iter()
-                    .filter(|a| f64::from(a.matches) >= (f64::from(total_matches) / 200.0))
-                    .collect::<Vec<Matchup>>();
-                all_matchups.sort_by(|a, b| b.winrate.partial_cmp(&a.winrate).unwrap());
+                // No filtering. Keep everything.
+                // Optional: keep a deterministic ordering (by winrate desc, then matches desc).
+                all_matchups.sort_by(|a, b| {
+                    b.winrate
+                        .partial_cmp(&a.winrate)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| b.matches.cmp(&a.matches))
+                });
 
-                if all_matchups.len() >= 5 {
-                    let best_matchups: Vec<Matchup> = all_matchups.clone()[..5].to_vec();
-                    let mut worst_matchups: Vec<Matchup> =
-                        all_matchups.clone()[all_matchups.len() - 5..].to_vec();
-                    worst_matchups.reverse();
-
-                    let matchup_data = MatchupData {
-                        best_matchups,
-                        worst_matchups,
-                        total_matches,
-                    };
-                    Ok(matchup_data)
-                } else {
-                    Ok(MatchupData {
-                        best_matchups: vec![],
-                        worst_matchups: vec![],
-                        total_matches: 0,
-                    })
-                }
+                Ok(MatchupData {
+                    matchups: all_matchups,
+                    total_matches,
+                })
             }
         }
 

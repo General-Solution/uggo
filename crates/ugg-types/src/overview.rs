@@ -34,6 +34,13 @@ impl Overview {
         }
     }
 
+    pub fn wins(&self) -> i64 {
+        match self {
+            Overview::Arena(a) => a.wins,
+            Overview::Default(d) => d.wins,
+        }
+    }
+
     #[must_use]
     pub fn abilities(&self) -> Abilities {
         match self {

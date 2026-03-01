@@ -7,6 +7,20 @@ use ratatui::{
 };
 use ugg_types::matchups::{Matchup, MatchupData};
 
+/// Select best and worst matchups from the full list.
+/// Assumes `matchups` is already sorted by winrate desc (recommended),
+/// but still behaves reasonably even if it isn't.
+/// Returns borrowed references to avoid cloning.
+fn best_and_worst_slices<'a>(matchups: &'a [Matchup], n: usize) -> (&'a [Matchup], &'a [Matchup]) {
+    if matchups.is_empty() || n == 0 {
+        return (&[], &[]);
+    }
+    let k = n.min(matchups.len());
+    let best = &matchups[..k];
+    let worst = &matchups[matchups.len() - k..]; // still in winrate-desc order
+    (best, worst)
+}
+
 pub fn make_matchup_row<'a>(
     title: &'a str,
     matchups: &'a [Matchup],
@@ -35,11 +49,12 @@ pub fn make_matchup_row<'a>(
 pub fn make<'a>(
     matchups: &'a MatchupData,
     champ_data: &'a HashMap<String, ChampionShort>,
-) -> [impl Widget + 'a; 2] {
+) -> [Paragraph<'a>; 2] {
+    let (best, worst) = best_and_worst_slices(&matchups.matchups, 5);
     [
-        make_matchup_row("Best Matchups", &matchups.best_matchups, champ_data)
+        make_matchup_row("Best Matchups", best, champ_data)
             .style(Style::default().fg(Color::Cyan).bold()),
-        make_matchup_row("Worst Matchups", &matchups.worst_matchups, champ_data)
+        make_matchup_row("Worst Matchups", worst, champ_data)
             .style(Style::default().fg(Color::Red).bold()),
     ]
 }
