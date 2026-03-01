@@ -6,7 +6,7 @@ members = [
     "crates/ugg-api",
     "crates/config",
     "crates/lol-client"
-]
+, "crates/winrates"]
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

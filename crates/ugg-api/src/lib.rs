@@ -5,11 +5,8 @@ use ddragon::models::items::Item;
 use ddragon::models::runes::RuneElement;
 use ddragon::{Client, ClientBuilder};
 use levenshtein::levenshtein;
-use lru::LruCache;
 use serde::de::DeserializeOwned;
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use ugg_types::mappings::{self, Rank};
@@ -17,6 +14,11 @@ use ugg_types::matchups::{MatchupData, Matchups};
 use ugg_types::overview::{ChampOverview, Overview};
 use ugg_types::rune::RuneExtended;
 use ureq::Agent;
+
+use std::fs;
+use std::io::Read;
+use std::time::{Duration, SystemTime};
+
 
 mod util;
 
@@ -41,8 +43,11 @@ pub enum UggError {
 pub struct DataApi {
     agent: Agent,
     ddragon: Client,
-    overview_cache: RefCell<LruCache<String, ChampOverview>>,
-    matchup_cache: RefCell<LruCache<String, Matchups>>,
+
+    // New:
+    cache_dir: PathBuf,
+    cache_ttl: Duration,
+    log_cache: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,8 +72,19 @@ pub struct UggApi {
 
 impl DataApi {
     pub fn new(version: Option<String>, cache_dir: Option<PathBuf>) -> Result<Self, UggError> {
+        // default: 24h TTL, logging off
+        Self::new_with_cache_options(version, cache_dir, 24, false)
+    }
+
+    pub fn new_with_cache_options(
+        version: Option<String>,
+        cache_dir: Option<PathBuf>,
+        cache_ttl_hours: u64,
+        log_cache: bool,
+    ) -> Result<Self, UggError> {
         let mut client_builder = ClientBuilder::new();
         let safe_dir = cache_dir.ok_or(UggError::Unknown)?;
+
         if let Some(v) = version {
             client_builder = client_builder.version(v.as_str());
         }
@@ -76,15 +92,137 @@ impl DataApi {
             client_builder = client_builder.cache(dir);
         }
 
-        let cache_size = NonZeroUsize::new(50).unwrap_or(NonZeroUsize::MIN);
         Ok(Self {
             agent: Agent::new_with_defaults(),
             ddragon: client_builder.build()?,
-            overview_cache: RefCell::new(LruCache::new(cache_size)),
-            matchup_cache: RefCell::new(LruCache::new(cache_size)),
+            cache_dir: safe_dir,
+            cache_ttl: Duration::from_secs(cache_ttl_hours.saturating_mul(60 * 60)),
+            log_cache,
         })
     }
 
+    fn log_cache_event(&self, event: &str, kind: &str, key: &str, extra: Option<&str>) {
+        if !self.log_cache {
+            return;
+        }
+        match extra {
+            Some(e) => eprintln!("[cache] {event} kind={kind} key={key} {e}"),
+            None => eprintln!("[cache] {event} kind={kind} key={key}"),
+        }
+    }
+
+    fn cache_file_path(&self, kind: &str, cache_path: &str) -> PathBuf {
+        // indexed by cache_path (we use sha256(cache_path) as stable filename)
+        let key = sha256(cache_path);
+        self.cache_dir
+            .join("ugg-cache")
+            .join(kind)
+            .join(format!("{key}.json"))
+    }
+
+    fn read_file_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+        let mut f = fs::File::open(path)?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn write_file_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, bytes)
+    }
+
+    fn is_fresh(&self, modified: SystemTime) -> bool {
+        match SystemTime::now().duration_since(modified) {
+            Ok(age) => age <= self.cache_ttl,
+            Err(_) => false, // clock skew => treat as stale
+        }
+    }
+
+    fn fetch_raw_body(&self, url: &str) -> Result<Vec<u8>, UggError> {
+        let mut resp = self
+            .agent
+            .get(url)
+            .call()
+            .map_err(Box::new)?
+            .into_body();
+
+        let mut reader = resp.as_reader();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).map_err(|_| UggError::Unknown)?;
+        Ok(buf)
+    }
+
+    fn get_data_cached_json<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        kind: &str,
+        cache_path: &str,
+    ) -> Result<T, UggError> {
+        let file_path = self.cache_file_path(kind, cache_path);
+        let key = sha256(cache_path);
+
+        // Try cache
+        if let Ok(meta) = fs::metadata(&file_path) {
+            if let Ok(modified) = meta.modified() {
+                if self.is_fresh(modified) {
+                    match Self::read_file_bytes(&file_path) {
+                        Ok(mut bytes) => match simd_json::serde::from_slice::<T>(&mut bytes) {
+                            Ok(v) => {
+                                self.log_cache_event("hit", kind, &key, None);
+                                return Ok(v);
+                            }
+                            Err(_) => {
+                                // corruption: parse failed
+                                self.log_cache_event(
+                                    "corruption",
+                                    kind,
+                                    &key,
+                                    Some("cached_json_failed_to_deserialize"),
+                                );
+                                // fallthrough to network fetch
+                            }
+                        },
+                        Err(_) => {
+                            self.log_cache_event(
+                                "corruption",
+                                kind,
+                                &key,
+                                Some("cached_file_unreadable"),
+                            );
+                            // fallthrough
+                        }
+                    }
+                } else {
+                    self.log_cache_event("stale", kind, &key, None);
+                }
+            } else {
+                self.log_cache_event("stale", kind, &key, Some("no_mtime"));
+            }
+        } else {
+            self.log_cache_event("miss", kind, &key, None);
+        }
+
+        // Fetch from network
+        let bytes = self.fetch_raw_body(url)?;
+        // Best-effort write
+        if let Err(e) = Self::write_file_bytes(&file_path, &bytes) {
+            self.log_cache_event(
+                "write_failed",
+                kind,
+                &key,
+                Some(&format!("err={e}")),
+            );
+        }
+
+        // Parse network result
+        let mut bytes = bytes;
+        simd_json::serde::from_slice::<T>(&mut bytes).map_err(UggError::ParseError)
+    }
+
+    // Keep your existing get_data (non-cached) for other endpoints if you want.
     fn get_data<T: DeserializeOwned>(&self, url: &str) -> Result<T, UggError> {
         simd_json::serde::from_reader::<ureq::BodyReader<'_>, T>(
             self.agent
@@ -188,21 +326,11 @@ impl DataApi {
         );
         let cache_path = format!("{data_path}-{region}-{role}");
 
-        let stats_data = if let Some(data) = self
-            .overview_cache
-            .try_borrow_mut()
-            .ok()
-            .and_then(|mut c| c.get(&sha256(&cache_path)).cloned())
-        {
-            Ok(data)
-        } else {
-            self.get_data::<ChampOverview>(&format!("https://stats2.u.gg/lol/1.5/{data_path}.json"))
-        }?;
+        let stats_url = format!("https://stats2.u.gg/lol/1.5/{data_path}.json");
 
-        if let Ok(mut c) = self.overview_cache.try_borrow_mut() {
-            c.put(sha256(&cache_path), stats_data.clone());
-        }
-
+        let stats_data: ChampOverview =
+            self.get_data_cached_json(&stats_url, "overview", &cache_path)?;
+        
         let data_by_role = Rank::preferred_order()
             .iter()
             .find_map(|rank| {
@@ -249,19 +377,11 @@ impl DataApi {
         );
         let cache_path = format!("{data_path}-{region}-{role}");
 
-        let matchup_data = if let Some(data) = self
-            .matchup_cache
-            .try_borrow_mut()
-            .ok()
-            .and_then(|mut c| c.get(&sha256(&cache_path)).cloned())
-        {
-            Ok(data)
-        } else {
-            self.get_data::<Matchups>(&format!(
-                "https://stats2.u.gg/lol/1.5/matchups/{data_path}.json",
-            ))
-        }?;
+        let matchup_url = format!("https://stats2.u.gg/lol/1.5/matchups/{data_path}.json");
 
+        let matchup_data: Matchups =
+            self.get_data_cached_json(&matchup_url, "matchups", &cache_path)?;
+            
         let data_by_role = Rank::preferred_order()
             .iter()
             .find_map(|rank| {
@@ -287,7 +407,17 @@ impl DataApi {
 
 impl UggApi {
     pub fn new(version: Option<String>, cache_dir: Option<PathBuf>) -> Result<Self, UggError> {
-        let mut inner_api = DataApi::new(version, cache_dir.clone())?;
+        Self::new_with_cache_options(version, cache_dir, 24, false)
+    }
+
+    pub fn new_with_cache_options(
+        version: Option<String>,
+        cache_dir: Option<PathBuf>,
+        cache_ttl_hours: u64,
+        log_cache: bool,
+    ) -> Result<Self, UggError> {
+        let mut inner_api =
+            DataApi::new_with_cache_options(version, cache_dir.clone(), cache_ttl_hours, log_cache)?;
 
         let mut current_version = inner_api.get_current_version();
         let allowed_versions = inner_api.get_supported_versions()?;
@@ -409,6 +539,8 @@ impl UggApi {
 pub struct UggApiBuilder {
     version: Option<String>,
     cache_dir: Option<PathBuf>,
+    cache_ttl_hours: u64,
+    log_cache: bool,
 }
 
 impl UggApiBuilder {
@@ -417,23 +549,40 @@ impl UggApiBuilder {
         Self {
             version: None,
             cache_dir: None,
+            cache_ttl_hours: 24,
+            log_cache: false,
         }
     }
 
-    #[must_use]
-    pub fn version(mut self, version: &str) -> Self {
+    #[must_use] pub fn version(mut self, version: &str) -> Self {
         self.version = Some(version.to_owned());
+        self 
+    }
+
+    #[must_use] pub fn cache_dir(mut self, cache_dir: &Path) -> Self {
+        self.cache_dir = Some(cache_dir.to_path_buf()); 
+        self
+    }
+    
+    #[must_use]
+    pub fn cache_ttl_hours(mut self, hours: u64) -> Self {
+        self.cache_ttl_hours = hours.max(1);
         self
     }
 
     #[must_use]
-    pub fn cache_dir(mut self, cache_dir: &Path) -> Self {
-        self.cache_dir = Some(cache_dir.to_path_buf());
+    pub fn log_cache(mut self, enabled: bool) -> Self {
+        self.log_cache = enabled;
         self
     }
 
     pub fn build(self) -> Result<UggApi, UggError> {
-        UggApi::new(self.version, self.cache_dir)
+        UggApi::new_with_cache_options(
+            self.version,
+            self.cache_dir,
+            self.cache_ttl_hours,
+            self.log_cache,
+        )
     }
 }
 
