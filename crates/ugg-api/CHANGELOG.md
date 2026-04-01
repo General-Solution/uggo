@@ -4,6 +4,13 @@
   * dependencies
     * ugg-types bumped from 0.8.0 to 0.8.1
 
+## [0.6.2](https://github.com/kade-robertson/uggo/compare/uggo-ugg-api-v0.6.1...uggo-ugg-api-v0.6.2) (2026-04-01)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate sha2 to 0.11.0 ([#537](https://github.com/kade-robertson/uggo/issues/537)) ([ab9d072](https://github.com/kade-robertson/uggo/commit/ab9d0729d458149f0fa25f30d64a6a78e2d389c9))
+
 ## [0.6.1](https://github.com/kade-robertson/uggo/compare/uggo-ugg-api-v0.6.0...uggo-ugg-api-v0.6.1) (2025-10-23)
 
 
