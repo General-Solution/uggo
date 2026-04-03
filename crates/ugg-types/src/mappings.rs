@@ -186,28 +186,27 @@ pub enum Region {
 
 impl Region {
     #[must_use]
-    pub fn to_api_string(self) -> String {
-        (match self {
-            Region::NA1 => 1,
-            Region::EUW1 => 2,
-            Region::KR => 3,
-            Region::EUN1 => 4,
-            Region::BR1 => 5,
-            Region::LA1 => 6,
-            Region::LA2 => 7,
-            Region::OC1 => 8,
-            Region::RU => 9,
-            Region::TR1 => 10,
-            Region::JP1 => 11,
-            Region::World => 12,
-            Region::PH2 => 13,
-            Region::SG2 => 14,
-            Region::TH2 => 15,
-            Region::TW2 => 16,
-            Region::VN2 => 17,
-            Region::ME1 => 18,
-        })
-        .to_string()
+    pub fn to_api_string(self) -> &'static str {
+        match self {
+            Region::NA1 => "na1",
+            Region::EUW1 => "euw1",
+            Region::KR => "kr",
+            Region::EUN1 => "eun1",
+            Region::BR1 => "br1",
+            Region::LA1 => "la1",
+            Region::LA2 => "la2",
+            Region::OC1 => "oc1",
+            Region::RU => "ru",
+            Region::TR1 => "tr1",
+            Region::JP1 => "jp1",
+            Region::World => "world",
+            Region::PH2 => "ph2",
+            Region::SG2 => "sg2",
+            Region::TH2 => "th2",
+            Region::TW2 => "tw2",
+            Region::VN2 => "vn2",
+            Region::ME1 => "me1",
+        }
     }
 
     #[must_use]

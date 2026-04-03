@@ -42,7 +42,7 @@ pub fn calculate_group_winrate(
     // 2) Fetch enemy playrates for the role across *all* champions
     //    (includes pool champs as enemies automatically)
     let (_real_wr_by_id, enemy_playrate_by_id, resolved_role_by_id) =
-        fetch_real_stats_and_playrates(api, role, region, mode, build);
+        fetch_real_stats_and_playrates(api, role, region, mode);
 
     // 3) For each pool champ, fetch matchups and build (enemy_id -> wr_vs_enemy)
     //    Also respect per-champ role snapping returned by UGG.
@@ -139,43 +139,48 @@ pub fn fetch_real_stats_and_playrates(
     role: mappings::Role,
     region: mappings::Region,
     mode: mappings::Mode,
-    build: mappings::Build,
 ) -> (
-    HashMap<i64, f64>,            // real winrate
-    HashMap<i64, f64>,            // playrate
+    HashMap<i64, f64>,            // real winrate (0..1)
+    HashMap<i64, f64>,            // playrate (0..1)
     HashMap<i64, mappings::Role>, // resolved role
 ) {
-    let champs: Vec<ChampionShort> = api.champ_data.values().cloned().collect();
+    let summary = match api.get_meta_summary(region, mode, mappings::Rank::EmeraldPlus) {
+        Ok(summary) => summary,
+        Err(e) => {
+            eprintln!("Failed to get meta summary: {e:?}");
+            return (HashMap::new(), HashMap::new(), HashMap::new());
+        }
+    };
+    // Pull the role bucket we care about.
+    let Some(champs) = summary.role_winrates.roles.get(&role) else {
+        return (HashMap::new(), HashMap::new(), HashMap::new());
+    };
 
-    let mut overview_by_id: HashMap<i64, Overview> = HashMap::new();
+    // Compute total matches for playrate denominator.
+    let total_matches: f64 = champs
+        .iter()
+        .map(|c| c.stats.matches.max(0) as f64)
+        .sum();
+
+    let mut real_wr_by_id: HashMap<i64, f64> = HashMap::new();
+    let mut playrate_by_id: HashMap<i64, f64> = HashMap::new();
     let mut resolved_role_by_id: HashMap<i64, mappings::Role> = HashMap::new();
 
-    for champ in &champs {
-        let champ_id = champ.key.parse::<i64>().unwrap_or(0);
+    for c in champs {
+        let Ok(champ_id) = c.champion_id.parse::<i64>() else {
+            continue;
+        };
         if champ_id == 0 {
             continue;
         }
 
-        let Ok((overview, returned_role)) = api.get_stats(champ, role, region, mode, build) else {
-            continue;
-        };
-
-        overview_by_id.insert(champ_id, overview);
-        resolved_role_by_id.insert(champ_id, returned_role);
-    }
-
-    let total_matches: f64 = overview_by_id.values().map(|o| o.matches() as f64).sum();
-
-    let mut real_wr_by_id: HashMap<i64, f64> = HashMap::new();
-    let mut playrate_by_id: HashMap<i64, f64> = HashMap::new();
-
-    for (champ_id, overview) in overview_by_id {
-        let matches = overview.matches() as f64;
+        let matches = c.stats.matches.max(0) as f64;
         if matches <= 0.0 {
             continue;
         }
 
-        let winrate = overview.wins() as f64 / matches;
+        let wins = c.stats.wins.max(0) as f64;
+        let winrate = wins / matches;
 
         let playrate = if total_matches > 0.0 {
             matches / total_matches
@@ -185,6 +190,7 @@ pub fn fetch_real_stats_and_playrates(
 
         real_wr_by_id.insert(champ_id, winrate);
         playrate_by_id.insert(champ_id, playrate);
+        resolved_role_by_id.insert(champ_id, role);
     }
 
     (real_wr_by_id, playrate_by_id, resolved_role_by_id)

@@ -24,6 +24,15 @@ use crate::overview::handle_unknown;
 //
 // This module only "names fields" and keeps integers. No derived floats.
 
+fn log_stage(stage: &str) {
+    // swap to `tracing::debug!` if you prefer
+    eprintln!("[meta_summary parse] {stage}");
+}
+
+fn log_err<E: std::fmt::Debug>(stage: &str, err: &E) {
+    eprintln!("[meta_summary parse] ERROR at {stage}: {err:?}");
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct RoleWinrates {
     /// keyed by role name from the JSON (e.g. "adc", "top", "jungle", ...)
@@ -51,10 +60,8 @@ impl<'de> Deserialize<'de> for RoleWinrates {
                 let mut roles = HashMap::<Role, Vec<ChampionWinrateRaw>>::new();
 
                 while let Some(role_key) = map.next_key::<String>()? {
-                    // Convert "adc"/"top"/etc into Role without teaching Role about this endpoint.
-                    // If you WANT strictness, see the strict version below.
                     let role = get_role(&role_key);
-
+                
                     let champs = map.next_value::<Vec<ChampionWinrateRaw>>()?;
                     roles.insert(role, champs);
                 }
@@ -84,7 +91,7 @@ impl<'de> Deserialize<'de> for ChampionWinrateRaw {
             type Value = ChampionWinrateRaw;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str(r#"["<champion_id>", [<stats...>]]"#)
+                f.write_str(r#"["<champion_id>", [[matchups...]], wins, matches, total_damage, total_gold, kills, assists, deaths, cs, ...]"#)
             }
 
             fn visit_seq<V>(self, mut seq: V) -> Result<ChampionWinrateRaw, V::Error>
@@ -92,14 +99,43 @@ impl<'de> Deserialize<'de> for ChampionWinrateRaw {
                 V: SeqAccess<'de>,
             {
                 let champion_id = handle_unknown(seq.next_element::<String>());
-                let stats = seq
-                    .next_element::<ChampionWinrateStatsRaw>()?
-                    .ok_or_else(|| serde::de::Error::custom("Missing champion stats array"))?;
 
-                // Ignore any extra trailing elements if the format grows.
-                while let Some(IgnoredAny) = seq.next_element()? {}
+                // Now parse the packed fields from the SAME seq (not a nested stats array)
+                let worst_matchups = handle_unknown(seq.next_element::<Vec<MatchupVsEnemyRaw>>());
 
-                Ok(ChampionWinrateRaw { champion_id, stats })
+                let wins = handle_unknown(seq.next_element::<i64>());
+                let matches = handle_unknown(seq.next_element::<i64>());
+
+                let total_damage = handle_unknown(seq.next_element::<i64>());
+                let total_gold = handle_unknown(seq.next_element::<i64>());
+
+                let total_kills = handle_unknown(seq.next_element::<i64>());
+                let total_assists = handle_unknown(seq.next_element::<i64>());
+                let total_deaths = handle_unknown(seq.next_element::<i64>());
+
+                let total_cs = handle_unknown(seq.next_element::<i64>());
+
+                // Keep any future appended ints.
+                let mut extra = Vec::<i64>::new();
+                while let Some(v) = seq.next_element::<i64>()? {
+                    extra.push(v);
+                }
+
+                Ok(ChampionWinrateRaw {
+                    champion_id,
+                    stats: ChampionWinrateStatsRaw {
+                        worst_matchups,
+                        wins,
+                        matches,
+                        total_damage,
+                        total_gold,
+                        total_kills,
+                        total_assists,
+                        total_deaths,
+                        total_cs,
+                        extra,
+                    },
+                })
             }
         }
 
@@ -126,63 +162,6 @@ pub struct ChampionWinrateStatsRaw {
     /// Any extra integers appended by the API that we don't know about yet.
     /// Keeping them lets you debug/new-field without breaking parsing.
     pub extra: Vec<i64>,
-}
-
-impl<'de> Deserialize<'de> for ChampionWinrateStatsRaw {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct StatsVisitor;
-
-        impl<'de> Visitor<'de> for StatsVisitor {
-            type Value = ChampionWinrateStatsRaw;
-
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("[[worst_matchups...], wins, matches, total_damage, total_gold, kills, assists, deaths, cs, ...]")
-            }
-
-            fn visit_seq<V>(self, mut seq: V) -> Result<ChampionWinrateStatsRaw, V::Error>
-            where
-                V: SeqAccess<'de>,
-            {
-                let worst_matchups = handle_unknown(seq.next_element::<Vec<MatchupVsEnemyRaw>>());
-
-                let wins = handle_unknown(seq.next_element::<i64>());
-                let matches = handle_unknown(seq.next_element::<i64>());
-
-                let total_damage = handle_unknown(seq.next_element::<i64>());
-                let total_gold = handle_unknown(seq.next_element::<i64>());
-
-                let total_kills = handle_unknown(seq.next_element::<i64>());
-                let total_assists = handle_unknown(seq.next_element::<i64>());
-                let total_deaths = handle_unknown(seq.next_element::<i64>());
-
-                let total_cs = handle_unknown(seq.next_element::<i64>());
-
-                // If the endpoint appends more ints later, keep them.
-                let mut extra = Vec::<i64>::new();
-                while let Some(v) = seq.next_element::<i64>()? {
-                    extra.push(v);
-                }
-
-                Ok(ChampionWinrateStatsRaw {
-                    worst_matchups,
-                    wins,
-                    matches,
-                    total_damage,
-                    total_gold,
-                    total_kills,
-                    total_assists,
-                    total_deaths,
-                    total_cs,
-                    extra,
-                })
-            }
-        }
-
-        deserializer.deserialize_seq(StatsVisitor)
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]

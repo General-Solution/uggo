@@ -38,7 +38,7 @@ pub fn print_best_two_champ_pool_against_meta(
 
     // Fetch role-wide playrates + overview winrates for filtering & display
     let (real_wr_by_id, playrate_by_id, _resolved_role_by_id) =
-        fetch_real_stats_and_playrates(api, role, region, mode, build);
+        fetch_real_stats_and_playrates(api, role, region, mode);
 
     // Pre-filter candidates by playrate threshold
     // (also skip adding the base champ itself)

@@ -27,16 +27,24 @@ type UggAPIVersions = HashMap<String, HashMap<String, String>>;
 
 #[derive(Error, Debug)]
 pub enum UggError {
+    #[error("HttpStatus error")]
+    HttpStatus { code: u16, url: String, body: String },
+
     #[error("DDragon error")]
     DDragonError(#[from] ddragon::ClientError),
+    
     #[error("HTTP request failed")]
     RequestError(#[from] Box<ureq::Error>),
+    
     #[error("JSON parsing failed")]
     ParseError(#[from] simd_json::Error),
+    
     #[error("Missing region or rank entry")]
     MissingRegionOrRank,
+    
     #[error("Missing role entry")]
     MissingRole,
+    
     #[error("Unknown error occurred")]
     Unknown,
 }
@@ -143,14 +151,25 @@ impl DataApi {
     }
 
     fn fetch_raw_body(&self, url: &str) -> Result<Vec<u8>, UggError> {
-        let mut resp = self
-            .agent
-            .get(url)
-            .call()
-            .map_err(Box::new)?
-            .into_body();
-
-        let mut reader = resp.as_reader();
+        use std::io::Read;
+    
+        let resp = self.agent.get(url).call();
+    
+        let resp = match resp {
+            Ok(r) => r,
+            Err(ureq::Error::StatusCode(code)) => {
+                // No response body available in this ureq mode/version.
+                return Err(UggError::HttpStatus {
+                    code,
+                    url: url.to_string(),
+                    body: String::new(),
+                });
+            }
+            Err(e) => return Err(UggError::RequestError(Box::new(e))),
+        };
+    
+        let mut body = resp.into_body();
+        let mut reader = body.as_reader();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).map_err(|_| UggError::Unknown)?;
         Ok(buf)
@@ -207,7 +226,12 @@ impl DataApi {
         }
 
         // Fetch from network
-        let bytes = self.fetch_raw_body(url)?;
+        self.log_cache_event("fetch_start", kind, &key, Some(url));
+        let bytes = self.fetch_raw_body(url).map_err(|e| {
+            self.log_cache_event("fetch_failed", kind, &key, Some(&format!("{e:?}")));
+            e
+        })?;
+        self.log_cache_event("fetch_ok", kind, &key, Some(&format!("len={}", bytes.len())));
         // Best-effort write
         if let Err(e) = Self::write_file_bytes(&file_path, &bytes) {
             self.log_cache_event(
@@ -220,7 +244,38 @@ impl DataApi {
 
         // Parse network result
         let mut bytes = bytes;
+        Self::debug_prefix(&bytes);
         simd_json::serde::from_slice::<T>(&mut bytes).map_err(UggError::ParseError)
+    }
+
+    fn debug_prefix(bytes: &[u8]) {
+        use std::borrow::Cow;
+
+        let len = bytes.len();
+        let head = &bytes[..len.min(32)];
+        let head_hex = head.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+
+        // find first non-whitespace byte (JSON ws: space, \n, \r, \t)
+        let first_non_ws = bytes
+            .iter()
+            .enumerate()
+            .find(|(_, b)| !matches!(b, b' ' | b'\n' | b'\r' | b'\t'))
+            .map(|(i, b)| (i, *b));
+
+        let preview = match std::str::from_utf8(&bytes[..len.min(160)]) {
+            Ok(s) => Cow::Borrowed(s),
+            Err(_) => Cow::Owned(
+                bytes[..len.min(160)]
+                    .iter()
+                    .map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '�' })
+                    .collect::<String>(),
+            ),
+        };
+
+        eprintln!("len={len}");
+        eprintln!("head_hex={head_hex}");
+        eprintln!("first_non_ws={first_non_ws:?} (expect '[' => 0x5b)");
+        eprintln!("preview={preview:?}");
     }
 
     // Keep your existing get_data (non-cached) for other endpoints if you want.
@@ -574,6 +629,22 @@ impl UggApi {
             &self.api_versions,
         )
     }
+
+    pub fn get_meta_summary(
+        &self,
+        region: Region,
+        mode: Mode,
+        rank: Rank,
+    ) -> Result<MetaSummary, UggError> {
+        self.api.get_meta_summary(
+            &self.patch_version,
+            region,
+            mode,
+            rank,
+            &self.api_versions,
+        )
+    }
+
 }
 
 pub struct UggApiBuilder {
